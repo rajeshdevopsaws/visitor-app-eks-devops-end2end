@@ -42,7 +42,7 @@ In this project, we will build a containerized flask app that connects with redi
 
 ### Architecture Diagram
 
-![Architecture Diagram](https://gitlab.com/kanumuru/devops-end-2-end/-/raw/main/assets/Architecture.png)
+![Architecture Diagram](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/Architecture.png)
 
 
 ### Project Description
@@ -89,11 +89,18 @@ The flask app is available outside the cluster using the NodePort service on the
 
 GitLab is a web-based DevOps lifecycle tool that provides a Git-repository manager providing wiki, issue-tracking and CI/CD pipeline features, using an open-source license, developed by GitLab Inc.
 
-We have written the CI/CD pipeline code in the .gitlab-ci.yml file. The CI/CD pipeline is triggered when we push the code to the main branch. 
+We have written the CI/CD pipeline code in the .gitlab-ci.yml file. The CI/CD pipeline is triggered when we push the code to the non release branch. 
+
+![CI Stages NoN Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/CI-Stages-non-release.png)
 
 
-![CI Stages](https://gitlab.com/kanumuru/devops-end-2-end/-/raw/main/assets/CI-stages.png)
+For the release branch, we have added additional stages to the CI/CD pipeline such as building and pushing the docker image to ECR. 
+The release branch is in the format of v.x.x.x such as v.1.0.0
 
+![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/CI-Stages-release.png)
+
+Once release is triggered using the release branch. Then deployment to sit, uat and prod can be done using the manual trigger.
+![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/Deploy.png)
 
 We have added 3 variables in the GitLab project settings.
 - AWS_ACCESS_KEY_ID
