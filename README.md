@@ -97,10 +97,10 @@ We have written the CI/CD pipeline code in the .gitlab-ci.yml file. The CI/CD pi
 For the release branch, we have added additional stages to the CI/CD pipeline such as building and pushing the docker image to ECR. 
 The release branch is in the format of v.x.x.x such as v.1.0.0
 
-![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/blob/main/assetsCI-Stages-release.png?raw=true)
+![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/blob/main/assets/CI-Stages-release.png?raw=true)
 
 Once release is triggered using the release branch. Then deployment to sit, uat and prod can be done using the manual trigger.
-![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/blob/main/assetsDeploy.png?raw=true)
+![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/blob/main/assets/Deploy.png?raw=true)
 
 We have added 3 variables in the GitLab project settings.
 - AWS_ACCESS_KEY_ID
