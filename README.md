@@ -91,16 +91,16 @@ GitLab is a web-based DevOps lifecycle tool that provides a Git-repository manag
 
 We have written the CI/CD pipeline code in the .gitlab-ci.yml file. The CI/CD pipeline is triggered when we push the code to the non release branch. 
 
-![CI Stages NoN Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/CI-Stages-non-release.png)
+![CI Stages NoN Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/CI-Stages-non-release.png?raw=true)
 
 
 For the release branch, we have added additional stages to the CI/CD pipeline such as building and pushing the docker image to ECR. 
 The release branch is in the format of v.x.x.x such as v.1.0.0
 
-![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/CI-Stages-release.png)
+![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/CI-Stages-release.png?raw=true)
 
 Once release is triggered using the release branch. Then deployment to sit, uat and prod can be done using the manual trigger.
-![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/Deploy.png)
+![CI Stages Release](https://github.com/rajeshdevopsaws/visitor-app-eks-devops-end2end/tree/main/assets/Deploy.png?raw=true)
 
 We have added 3 variables in the GitLab project settings.
 - AWS_ACCESS_KEY_ID
