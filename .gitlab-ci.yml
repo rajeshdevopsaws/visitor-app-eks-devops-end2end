@@ -1,0 +1,265 @@
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+
+image: docker:19.03.10
+
+services:
+  - docker:dind
+
+before_script:
+    - apk add --no-cache curl unzip python3 sed
+    - pip3 install awscli 
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region $AWS_DEFAULT_REGION
+    - curl -LO https://releases.hashicorp.com/terraform/1.0.0/terraform_1.0.0_linux_amd64.zip
+    - unzip terraform_1.0.0_linux_amd64.zip
+    - mv terraform /usr/local/bin/
+    - terraform --version
+    - curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x ./kubectl
+    - mv ./kubectl /usr/local/bin/kubectl
+
+stages:
+  - build
+  - test
+  - package
+  - deployment
+  - deploy:sit
+  - deploy:uat
+  - deploy:prod
+
+
+.non-release: &release
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: always
+
+"Build Application":
+  <<: *release 
+  before_script:
+    - apk add --no-cache python3
+  stage: build
+  script:
+    - echo "Building Application..."
+    - cd app/
+    - pip3 install -r requirements.txt
+  needs: []
+
+"Python Bandit Scan":
+  <<: *release 
+  before_script:
+    - apk add --no-cache python3
+    - pip3 install bandit
+
+  stage: test
+  script:
+    - echo "Running bandit scan..."
+    - bandit -r . -f json | tee bandit_scan.json || true
+  needs: []
+
+
+"Build Container Gitlab":
+  <<: *release 
+  stage: package
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  before_script: []
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - >-
+      /kaniko/executor
+      --context "${CI_PROJECT_DIR}/app/"
+      --dockerfile "${CI_PROJECT_DIR}/app/Dockerfile"
+      --destination "${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /v\d.+/ || $CI_COMMIT_TAG'
+      when: never
+    - when: always
+
+
+"Build Container":
+  <<: *release 
+  before_script:
+    - apk add --no-cache python3
+    - pip3 install awscli 
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region $AWS_DEFAULT_REGION
+    - aws ecr describe-repositories --repository-names visitor_repo || { aws ecr create-repository --repository-name visitor_repo && echo "Repository created successfully"; }
+    - repositoryUri=$(aws ecr describe-repositories --region $AWS_DEFAULT_REGION --query 'repositories[?starts_with(@.repositoryName, `visitor`) == `true`].repositoryUri' --output text)
+    - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION  | docker login --username AWS --password-stdin $repositoryUri
+
+
+  stage: package
+  script:
+    - echo "Building and Deploying Docker Image..."
+    - docker build -t $repositoryUri:latest app/.
+    - docker tag $repositoryUri:latest $repositoryUri:$IMAGE_TAG
+    - docker push $repositoryUri:$IMAGE_TAG
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /v\d.+/'
+      when: always
+    - when: never
+
+
+"Package Deployment":
+  <<: *release 
+  stage: deployment
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  before_script: []
+  script:
+    - >
+      release-cli create --name $CI_COMMIT_BRANCH --description $CI_COMMIT_BRANCH-$CI_JOB_ID
+      --tag-name $CI_COMMIT_BRANCH --ref $CI_COMMIT_SHA
+  environment:
+    name: deployment
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /v\d.+/'
+      when: manual
+    - when: never
+    
+.deploy-job:
+  script: "echo 'Deploy to Environment'"
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+    - if: '$FORCE_DEPLOY == "true"'
+      when: manual
+
+
+"Deploy To SIT":
+  extends: .deploy-job
+  stage: deploy:sit
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - if: '$FORCE_DEPLOY == "true"'
+      when: always
+  script:
+    - echo "Validate, Plan & Deploy Terraform..."
+    - cd iac/sit/
+    - terraform init
+    - terraform validate
+    - terraform plan -out=tfplan
+    - terraform apply -auto-approve 
+    - security_group_id=$(aws ec2 describe-security-groups --query 'SecurityGroups[?starts_with(GroupName, `eks-cluster-sg-visitor-`)].GroupId' --output text)
+    - aws ec2 revoke-security-group-ingress --group-id $security_group_id  --ip-permissions   "`aws ec2 describe-security-groups --output json --group-ids $security_group_id --query "SecurityGroups[0].IpPermissions"`"
+    - port="30080"; cidr="0.0.0.0/0"; aws ec2 authorize-security-group-ingress --group-id $security_group_id --protocol tcp --port $port --cidr $cidr
+    - aws ec2 authorize-security-group-ingress --group-id $security_group_id   --source-group $security_group_id --protocol -1
+    - repositoryUri=$(aws ecr describe-repositories --region $AWS_DEFAULT_REGION --query 'repositories[?starts_with(@.repositoryName, `visitor`) == `true`].repositoryUri' --output text)
+    - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION  | docker login --username AWS --password-stdin $repositoryUri
+    - echo "Deploying to EKS to SIT..."
+    - aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name visitor-eks-cluster 
+    - kubectl delete deployment redis --ignore-not-found
+    - kubectl create deployment redis --image=redis:alpine --port=6379 --replicas=1
+    - kubectl delete service redis --ignore-not-found
+    - kubectl create service clusterip redis --tcp=6379:6379
+    - kubectl delete deployment visitor-counter --ignore-not-found
+    - kubectl create deployment visitor-counter --image=$repositoryUri:$IMAGE_TAG --port=3000 --replicas=2 
+    - kubectl create service nodeport visitor-counter --tcp=3000:3000 --node-port=30080 --dry-run=client -o yaml > service.yaml
+    - kubectl apply -f service.yaml
+    - echo "The application is available at below IPs:"
+    - aws ec2 describe-instances --filters "Name=tag:eks:nodegroup-name,Values=worker-group-*" --query "Reservations[*].Instances[*].[PublicIpAddress]"   --output text | awk '{print $0":30080"}'
+
+"Destroy SIT":
+  extends: .deploy-job
+  stage: deploy:sit
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+    - if: '$FORCE_DEPLOY == "true"'
+      when: manual
+  script:
+    - echo "Destroy Terraform..."
+    - cd iac/sit/
+    - terraform init
+    - terraform destroy -auto-approve
+  needs: ["Deploy To SIT"]
+
+"Deploy To UAT":
+  extends: .deploy-job
+  stage: deploy:uat
+  script:
+    - echo "Validate, Plan & Deploy Terraform..."
+    - cd iac/uat/
+    - terraform init
+    - terraform validate
+    - terraform plan -out=tfplan
+    - terraform apply -auto-approve
+    - security_group_id=$(aws ec2 describe-security-groups --query 'SecurityGroups[?starts_with(GroupName, `eks-cluster-sg-visitor-`)].GroupId' --output text)
+    - aws ec2 revoke-security-group-ingress --group-id $security_group_id  --ip-permissions   "`aws ec2 describe-security-groups --output json --group-ids $security_group_id --query "SecurityGroups[0].IpPermissions"`"
+    - port="30080"; cidr="0.0.0.0/0"; aws ec2 authorize-security-group-ingress --group-id $security_group_id --protocol tcp --port $port --cidr $cidr
+    - aws ec2 authorize-security-group-ingress --group-id $security_group_id   --source-group $security_group_id --protocol -1
+    - repositoryUri=$(aws ecr describe-repositories --region $AWS_DEFAULT_REGION --query 'repositories[?starts_with(@.repositoryName, `visitor`) == `true`].repositoryUri' --output text)
+    - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION  | docker login --username AWS --password-stdin $repositoryUri
+    - echo "Deploying to EKS to UAT..."
+    - aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name visitor-eks-cluster 
+    - kubectl delete deployment redis --ignore-not-found
+    - kubectl create deployment redis --image=redis:alpine --port=6379 --replicas=1
+    - kubectl delete service redis --ignore-not-found
+    - kubectl create service clusterip redis --tcp=6379:6379
+    - kubectl delete deployment visitor-counter --ignore-not-found
+    - kubectl create deployment visitor-counter --image=$repositoryUri:$IMAGE_TAG --port=3000 --replicas=2 
+    - kubectl create service nodeport visitor-counter --tcp=3000:3000 --node-port=30080 --dry-run=client -o yaml > service.yaml
+    - kubectl apply -f service.yaml
+    - echo "The application is available at below IPs:"
+    - aws ec2 describe-instances --filters "Name=tag:eks:nodegroup-name,Values=worker-group-*" --query "Reservations[*].Instances[*].[PublicIpAddress]"   --output text | awk '{print $0":30080"}'
+
+"Destroy UAT":
+  extends: .deploy-job
+  stage: deploy:uat
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+    - if: '$FORCE_DEPLOY == "true"'
+      when: manual
+  script:
+    - echo "Destroy Terraform..."
+    - cd iac/uat/
+    - terraform init
+    - terraform destroy -auto-approve
+  needs: ["Deploy To UAT"]
+
+
+"Deploy To Prod":
+  extends: .deploy-job
+  stage: deploy:prod
+  script:
+    - echo "Validate, Plan & Deploy Terraform..."
+    - cd iac/prod/
+    - terraform init
+    - terraform validate
+    - terraform plan -out=tfplan
+    - terraform apply -auto-approve
+    - security_group_id=$(aws ec2 describe-security-groups --query 'SecurityGroups[?starts_with(GroupName, `eks-cluster-sg-visitor-`)].GroupId' --output text)
+    - aws ec2 revoke-security-group-ingress --group-id $security_group_id  --ip-permissions   "`aws ec2 describe-security-groups --output json --group-ids $security_group_id --query "SecurityGroups[0].IpPermissions"`"
+    - port="30080"; cidr="0.0.0.0/0"; aws ec2 authorize-security-group-ingress --group-id $security_group_id --protocol tcp --port $port --cidr $cidr
+    - aws ec2 authorize-security-group-ingress --group-id $security_group_id   --source-group $security_group_id --protocol -1
+    - repositoryUri=$(aws ecr describe-repositories --region $AWS_DEFAULT_REGION --query 'repositories[?starts_with(@.repositoryName, `visitor`) == `true`].repositoryUri' --output text)
+    - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION  | docker login --username AWS --password-stdin $repositoryUri
+    - echo "Deploying to EKS to PROD..."
+    - aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name visitor-eks-cluster 
+    - kubectl delete deployment redis --ignore-not-found
+    - kubectl create deployment redis --image=redis:alpine --port=6379 --replicas=1
+    - kubectl delete service redis --ignore-not-found
+    - kubectl create service clusterip redis --tcp=6379:6379
+    - kubectl delete deployment visitor-counter --ignore-not-found
+    - IMAGE_NAME=$repositoryUri:$IMAGE_TAG
+    - cd ../.. && cd k8s/manifests/
+    - sed -i "s|\${IMAGE_NAME}|$repositoryUri:$IMAGE_TAG|g" visitor-app.yml
+    - kubectl apply -f visitor-app.yml
+    - kubectl create service nodeport visitor-counter --tcp=3000:3000 --node-port=30080 --dry-run=client -o yaml > service.yaml
+    - kubectl apply -f service.yaml
+    - kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+    - kubectl autoscale deployment visitor-counter --cpu-percent=10 --min=2 --max=10 
+    - echo "The application is available at below IPs:"
+    - aws ec2 describe-instances --filters "Name=tag:eks:nodegroup-name,Values=worker-group-*" --query "Reservations[*].Instances[*].[PublicIpAddress]"   --output text | awk '{print $0":30080"}'
